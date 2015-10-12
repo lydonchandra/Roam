@@ -28,6 +28,8 @@ class Stepper(Ui_stepper, QWidget):
         self.valueChanged = self.spinBox.valueChanged
         self.value = self.spinBox.value
         self.setValue = self.spinBox.setValue
+        self.stepUp.setIconSize(QSize(24, 24))
+        self.stepDown.setIconSize(QSize(24, 24))
 
     def installEventFilter(self, object):
         self.spinBox.installEventFilter(object)
@@ -78,6 +80,7 @@ class NumberWidget(EditorWidget):
             min = int(min)
         except ValueError:
             min = -sys.maxint - 1
+
         return max, min
 
     def _setwidgetvalues(self, min, max, prefix, suffix, step):
@@ -126,9 +129,10 @@ class DoubleNumberWidget(NumberWidget):
         try:
             min = float(min)
         except ValueError:
-            min = sys.float_info.min
-        print max, min
+            min = -sys.float_info.min - 1
+
         return max, min
+
 
     def setvalue(self, value):
         if not value:

@@ -17,6 +17,7 @@ from configmanager.models import (CaptureLayersModel, LayerTypeFilter, QgsFieldM
 import roam.editorwidgets
 import configmanager.editorwidgets
 from roam.api import FeatureForm, utils
+from roam.utils import log
 
 
 class WidgetBase(QWidget):
@@ -89,6 +90,11 @@ class FormWidget(ui_formwidget.Ui_Form, WidgetBase):
 
         self.addWidgetButton.setMenu(menu)
         self.addWidgetButton.setPopupMode(QToolButton.MenuButtonPopup)
+
+        self.defaultLayerCombo.layerChanged.connect(self.default_layer_changed)
+
+    def default_layer_changed(self, layer):
+        self.defaultFieldCombo.setLayer(layer)
 
     def layer_updated(self, index):
         if not self.selected_layer:
@@ -337,14 +343,24 @@ class FormWidget(ui_formwidget.Ui_Form, WidgetBase):
         self.readonlyCombo.setCurrentIndex(index)
 
         if not isinstance(default, dict):
+            self.defaultTab.setCurrentIndex(0)
             self.defaultvalueText.setText(default)
-            self.defaultvalueText.setEnabled(True)
-            self.expressionButton.setEnabled(True)
         else:
-            # TODO Handle the more advanced default values.
-            self.defaultvalueText.setText("Advanced default set in config")
-            self.defaultvalueText.setEnabled(False)
-            self.expressionButton.setEnabled(False)
+            self.defaultTab.setCurrentIndex(1)
+            layer = default['layer']
+            # TODO Handle the case of many layer fall though with defaults
+            # Not sure how to handle this in the UI just yet
+            if isinstance(layer, list):
+                layer = layer[0]
+
+            if isinstance(layer, basestring):
+                defaultfield = default['field']
+                expression = default['expression']
+                self.defaultValueExpression.setText(expression)
+                layer = roam.api.utils.layer_by_name(layer)
+                self.defaultLayerCombo.setLayer(layer)
+                self.defaultFieldCombo.setLayer(layer)
+                self.defaultFieldCombo.setField(defaultfield)
 
         self.nameText.setText(name)
         self.requiredCheck.setChecked(required)
@@ -413,6 +429,17 @@ class FormWidget(ui_formwidget.Ui_Form, WidgetBase):
         widgetdata = self._get_widget_config()
         self.widgetmodel.setData(index, widgetdata, Qt.UserRole)
 
+    def _get_default_config(self):
+        if self.defaultTab.currentIndex() == 0:
+            return self.defaultvalueText.text()
+        else:
+            default = {}
+            default['layer'] = self.defaultLayerCombo.currentLayer().name()
+            default['field'] = self.defaultFieldCombo.currentField()
+            default['expression'] = self.defaultValueExpression.text()
+            default['type'] = 'layer-value'
+            return default
+
     def _get_widget_config(self):
         def current_field():
             row = self.fieldList.currentIndex()
@@ -422,7 +449,7 @@ class FormWidget(ui_formwidget.Ui_Form, WidgetBase):
         configwidget, _, widgettype = self.current_config_widget
         widget = {}
         widget['field'] = current_field()
-        widget['default'] = self.defaultvalueText.text()
+        widget['default'] = self._get_default_config()
         widget['widget'] = widgettype
         widget['required'] = self.requiredCheck.isChecked()
         widget['rememberlastvalue'] = self.savevalueCheck.isChecked()
@@ -588,16 +615,44 @@ class LayerWidget(ui_layernode.Ui_Form, WidgetBase):
     def set_project(self, project, node):
         super(LayerWidget, self).set_project(project, node)
         self.layer = node.layer
+        forms = self.project.forms
+        self.inspection_form_combo.clear()
+        self.inspection_form_combo.clear()
+        for form in forms:
+            self.inspection_form_combo.addItem(form.name)
         tools = self.project.layer_tools(self.layer)
         delete = 'delete' in tools
         capture = 'capture' in tools
         edit_attr = 'edit_attributes' in tools
         edit_geom = 'edit_geom' in tools
+        inspection = 'inspection' in tools
         self.capture_check.setChecked(capture)
         self.delete_check.setChecked(delete)
         self.editattr_check.setChecked(edit_attr)
         self.editgeom_check.setChecked(edit_geom)
+        self.inspection_check.setChecked(inspection)
         self.datasouce_label.setText(self.layer.publicSource())
+
+        if inspection:
+            config = tools['inspection']
+            formindex = self.inspection_form_combo.findText(config['form'])
+            self.inspection_form_combo.setCurrentIndex(formindex)
+            for key, value in config['field_mapping'].iteritems():
+                self.inspection_fieldmappings.appendPlainText("{}, {}".format(key, value))
+        else:
+            self.inspection_form_combo.setCurrentIndex(0)
+            self.inspection_fieldmappings.setPlainText("")
+
+
+    def inspection_mappings(self):
+        if not self.inspection_fieldmappings.toPlainText():
+            return {}
+        text = self.inspection_fieldmappings.toPlainText().split('\n')
+        mappings = {}
+        for line in text:
+            field1, field2 = line.split(',')
+            mappings[field1] = field2.strip()
+        return mappings
 
     def write_config(self):
         config = self.project.settings.setdefault('selectlayerconfig', {})
@@ -607,15 +662,25 @@ class LayerWidget(ui_layernode.Ui_Form, WidgetBase):
         delete = self.delete_check.isChecked()
         editattr = self.editattr_check.isChecked()
         editgoem = self.editgeom_check.isChecked()
+        inspection = self.inspection_check.isChecked()
         tools = []
+
         if capture:
             tools.append("capture")
         if delete:
             tools.append("delete")
-        if editattr:
+        if editattr and not inspection:
+            # Inspection tool will override the edit button so you can't have both
             tools.append("edit_attributes")
         if editgoem:
             tools.append("edit_geom")
+        if inspection:
+            inspectionitem = dict(inspection=dict(
+                mode="Copy",
+                form=self.inspection_form_combo.currentText(),
+                field_mapping= self.inspection_mappings()
+            ))
+            tools.append(inspectionitem)
 
         infoconfig['tools'] = tools
 

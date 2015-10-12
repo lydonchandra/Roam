@@ -10,6 +10,8 @@ import roam.config
 
 import roam.resources_rc
 
+snapping = True
+
 
 class RubberBand(QgsRubberBand):
     def __init__(self, canvas, geometrytype, width=5, iconsize=20):
@@ -218,6 +220,20 @@ class PolylineTool(QgsMapTool):
         RoamEvents.selectioncleared.connect(self.selection_updated)
         RoamEvents.selectionchanged.connect(self.selection_updated)
 
+        self.snapping = snapping
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.reset()
+        if event.key() == Qt.Key_S:
+            self.toggle_snapping()
+
+    def toggle_snapping(self):
+        self.snapping = not self.snapping
+        global snapping
+        snapping = self.snapping
+        RoamEvents.snappingChanged.emit(snapping)
+
     def selection_updated(self, *args):
         if self.editmode:
             self.reset()
@@ -321,6 +337,7 @@ class PolylineTool(QgsMapTool):
         point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
         return point
 
+
     def canvasMoveEvent(self, event):
         if self.is_tracking:
             return
@@ -403,6 +420,9 @@ class PolylineTool(QgsMapTool):
         return True
 
     def snappoint(self, point):
+        if not self.snapping:
+            return self.canvas.getCoordinateTransform().toMapCoordinates(point)
+
         try:
             _, results = self.snapper.snapToBackgroundLayers(point)
             point = results[0].snappedVertex
@@ -485,13 +505,18 @@ class PointTool(TouchMapTool):
     def actions(self):
         return [self.captureaction, self.gpscapture]
 
+    def canvasPressEvent(self, event):
+        self.startpoint = event.pos()
+
     def canvasReleaseEvent(self, event):
         if self.pinching:
             return
 
         if self.dragging:
-            super(PointTool, self).canvasReleaseEvent(event)
-            return
+            diff = self.startpoint - event.pos()
+            if not abs(diff.x()) < 10 and not abs(diff.y()) < 10:
+                super(PointTool, self).canvasReleaseEvent(event)
+                return
 
         point = self.toMapCoordinates(event.pos())
         self.geometryComplete.emit(QgsGeometry.fromPoint(point))

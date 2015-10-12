@@ -23,6 +23,7 @@ from roam.structs import OrderedDictYAMLLoader
 from roam.dataaccess.database import Database
 from roam.structs import CaseInsensitiveDict
 
+import roam.qgisfunctions
 import roam.utils
 import roam
 import roam.maptools
@@ -336,7 +337,7 @@ class Form(object):
     def saveconfig(cls, config, folder):
         writefolderconfig(config, folder, configname='form')
 
-    def new_feature(self, set_defaults=True):
+    def new_feature(self, set_defaults=True, geometry=None):
         """
         Returns a new feature that is created for the layer this form is bound too
         :return: A new QgsFeature
@@ -345,6 +346,9 @@ class Form(object):
         layer = self.QGISLayer
         fields = layer.pendingFields()
         feature = QgsFeature(fields)
+        if geometry:
+            feature.setGeometry(geometry)
+
         if set_defaults:
             for index in xrange(fields.count()):
                 pkindexes = layer.dataProvider().pkAttributeIndexes()
@@ -369,12 +373,18 @@ class Form(object):
         :param feature: The feature that can be used for default values
         :return: A dict of default values for the form
         """
+        # One capture geometry, even for sub forms?
+        # HACK Remove me and do something smarter
+        roam.qgisfunctions.capturegeometry = feature.geometry()
         defaultwidgets = self.widgetswithdefaults()
         defaultvalues = defaults.default_values(defaultwidgets, feature, self.QGISLayer)
         return defaultvalues
 
     @property
     def has_geometry(self):
+        if not self.QGISLayer:
+            return False
+
         geomtype = self.QGISLayer.geometryType()
         return geomtype in supportedgeometry
 
@@ -565,9 +575,6 @@ class Project(QObject):
         :param name: The name of the form to return.
         :return:
         """
-        print self.forms
-        print [form.name for form in self.forms]
-        print [form.QGISLayer.name() for form in self.forms]
         for form in self.forms:
             if form.name == name:
                 return form
@@ -577,7 +584,16 @@ class Project(QObject):
 
     def layer_tools(self, layer):
         selectconfig = self.settings.setdefault('selectlayerconfig', {}).setdefault(layer.name(), {})
-        return selectconfig.get('tools', ['delete', 'capture', 'edit_attributes', 'edit_geom'])
+        tools = selectconfig.get('tools', ['delete', 'capture', 'edit_attributes', 'edit_geom'])
+        _tools = {}
+        for tool in tools:
+            if isinstance(tool, basestring):
+                _tools[tool] = {}
+            elif isinstance(tool, dict):
+                _tools[tool.keys()[0]] = tool.values()[0]
+
+        print "TOOLS", _tools
+        return _tools
 
     @property
     def forms(self):

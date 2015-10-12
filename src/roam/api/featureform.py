@@ -11,6 +11,7 @@ from PyQt4 import uic
 from PyQt4.QtCore import pyqtSignal, QObject, QSize, QEvent, QProcess, Qt, QPyNullVariant, QRegExp
 from PyQt4.QtGui import (QWidget,
                          QDialogButtonBox,
+                         QStackedWidget,
                          QStatusBar,
                          QLabel,
                          QGridLayout,
@@ -26,7 +27,7 @@ from PyQt4.QtGui import (QWidget,
                          QSpinBox,
                          QDoubleSpinBox)
 
-from qgis.core import QgsFields, QgsFeature, QgsGPSConnectionRegistry
+from qgis.core import QgsFields, QgsFeature, QgsGPSConnectionRegistry, QGis, QgsGeometry, QgsPoint
 from qgis.gui import QgsMessageBar
 
 from roam.editorwidgets.core import EditorWidgetException
@@ -40,10 +41,45 @@ import roam.editorwidgets.core
 import roam.defaults as defaults
 import roam.roam_style
 import roam.utils
+import roam.config
+
+from roam.ui.ui_geomwidget import Ui_GeomWidget
 
 values_file = os.path.join(tempfile.gettempdir(), "Roam")
 
 nullcheck = qgisutils.nullcheck
+
+
+class GeomWidget(Ui_GeomWidget, QStackedWidget):
+    def __init__(self, parent=None):
+        super(GeomWidget, self).__init__(parent)
+        self.setupUi(self)
+        self.geom = None
+        self.edited = False
+
+    def set_geometry(self, geom):
+        if not geom:
+            return
+
+        self.geom = geom
+        if self.geom.type() == QGis.Point:
+            self.setCurrentIndex(0)
+            point = geom.asPoint()
+            self.xedit.setText(str(point.x()))
+            self.yedit.setText(str(point.y()))
+            self.xedit.textChanged.connect(self.mark_edited)
+            self.yedit.textChanged.connect(self.mark_edited)
+        else:
+            self.setCurrentIndex(1)
+
+    def geometry(self):
+        if self.geom.type() == QGis.Point:
+            x = float(self.xedit.text())
+            y = float(self.yedit.text())
+            return QgsGeometry.fromPoint(QgsPoint(x, y))
+
+    def mark_edited(self):
+        self.edited = True
 
 
 def loadsavedvalues(layer):
@@ -83,6 +119,10 @@ def buildfromauto(formconfig, base):
     outlayout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
     outwidget = base
     outwidget.setLayout(outlayout)
+    if roam.config.settings.get("form_geom_edit", False):
+        geomwidget = GeomWidget()
+        geomwidget.setObjectName("__geomwidget")
+        outlayout.addRow("Geometry", geomwidget)
     for config in widgetsconfig:
         widgettype = config['widget']
         field = config['field']
@@ -146,6 +186,7 @@ class FeatureFormBase(QWidget):
         self.boundwidgets = CaseInsensitiveDict()
         self.requiredfields = CaseInsensitiveDict()
         self.feature = feature
+        self.geomwidget = None
         self.defaults = defaults
         self.bindingvalues = CaseInsensitiveDict()
         self.editingmode = kwargs.get("editmode", False)
@@ -174,6 +215,8 @@ class FeatureFormBase(QWidget):
         """
         Setup the widget in the form
         """
+        self.geomwidget = self.findcontrol("__geomwidget")
+
         widgetsconfig = self.formconfig['widgets']
 
         layer = self.form.QGISLayer
@@ -191,8 +234,7 @@ class FeatureFormBase(QWidget):
             field = field.lower()
 
             if field in self.boundwidgets:
-                utils.warning("Sorry you can't bind the same field ({}) twice.".format(field))
-                utils.warning("{} for field {} has been ignored in setup".format(widget, field))
+                utils.warning("Can't bind the same field ({}) twice.".format(field))
                 continue
 
             widget = self.findcontrol(field)
@@ -206,6 +248,7 @@ class FeatureFormBase(QWidget):
                 utils.debug("No label found for {}".format(field))
 
             widgetconfig = config.get('config', {})
+            widgetconfig['formwidget'] = self
             qgsfield = fields[field]
             try:
                 widgetwrapper = roam.editorwidgets.core.widgetwrapper(widgettype=widgettype,
@@ -228,6 +271,7 @@ class FeatureFormBase(QWidget):
             widgetwrapper.hidden = config.get('hidden', False)
 
             widgetwrapper.required = config.get('required', False)
+
 
             widgetwrapper.valuechanged.connect(self.updaterequired)
             widgetwrapper.largewidgetrequest.connect(RoamEvents.show_widget.emit)
@@ -261,6 +305,8 @@ class FeatureFormBase(QWidget):
                 utils.debug("Can't find control for field {}. Ignoring".format(field))
 
         self.validateall()
+        if self.geomwidget and self.feature:
+            self.geomwidget.set_geometry(self.feature.geometry())
 
     def bind_feature(self, feature):
         self.feature = feature
@@ -546,6 +592,35 @@ class FeatureForm(FeatureFormBase):
     def missingfields(self):
         return [field for field, valid in self.requiredfields.iteritems() if valid == False]
 
+    def to_feature(self):
+        """
+        Create a QgsFeature from the current form values
+        """
+        feature = QgsFeature(self.feature.fields())
+        feature.setGeometry(QgsGeometry(self.feature.geometry()))
+        self.updatefeautrefields(feature, self.getvalues()[0])
+        self.update_geometry(feature)
+        return feature
+
+    def updatefeautrefields(self, feature, values):
+        def field_or_null(field):
+            if field == '' \
+                    or field is None \
+                    or isinstance(field, QPyNullVariant):
+                return QPyNullVariant(str)
+            return field
+
+        for key, value in values.iteritems():
+            try:
+                fields = [w['field'] for w in self.formconfig['widgets']]
+                if key in fields:
+                    feature[key] = field_or_null(value)
+                else:
+                    feature[key] = value
+            except KeyError:
+                continue
+        return feature
+
     def save(self):
         """
         Save the values from the form into the set feature
@@ -554,23 +629,6 @@ class FeatureForm(FeatureFormBase):
         """
         if not self.allpassing:
             raise MissingValuesException.missing_values()
-
-        def updatefeautrefields(feature):
-            def field_or_null(field):
-                if field == '' or field is None or isinstance(field, QPyNullVariant):
-                    return QPyNullVariant(str)
-                return field
-
-            for key, value in values.iteritems():
-                try:
-                    fields = [w['field'] for w in self.formconfig['widgets']]
-                    if key in fields:
-                        feature[key] = field_or_null(value)
-                    else:
-                        feature[key] = value
-                except KeyError:
-                    continue
-            return feature
 
         def save_images(values):
             for field, wrapper in self.boundwidgets.iteritems():
@@ -590,7 +648,8 @@ class FeatureForm(FeatureFormBase):
         layer = self.form.QGISLayer
         values, savedvalues = self.getvalues()
         save_images(values)
-        updatefeautrefields(self.feature)
+        self.updatefeautrefields(self.feature, values)
+        self.update_geometry(self.feature)
         layer.startEditing()
         if self.editingmode:
             roam.utils.info("Updating feature {}".format(self.feature.id()))
@@ -608,6 +667,12 @@ class FeatureForm(FeatureFormBase):
             raise FeatureSaveException.not_saved(errors)
 
         self.featuresaved(self.feature, values)
+
+    def update_geometry(self, feature):
+        if self.geomwidget and self.geomwidget.edited:
+            geometry = self.geomwidget.geometry()
+            feature.setGeometry(geometry)
+        return feature
 
     def delete(self):
         """

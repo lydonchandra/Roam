@@ -5,6 +5,7 @@ import getpass
 import traceback
 import os
 import sys
+import faulthandler
 
 
 from PyQt4.QtCore import Qt, QFileInfo, QDir, QSize
@@ -178,14 +179,25 @@ class MainWindow(ui_mainwindow.Ui_MainWindow, QMainWindow):
         self.userlabel = QLabel("User: {user}".format(user=getpass.getuser()))
         self.positionlabel = QLabel('')
         self.gpslabel = QLabel("GPS: Not active")
-        self.statusbar.addWidget(self.projectlabel)
-        self.statusbar.addWidget(self.userlabel)
+        icon = QIcon(":/icons/info")
+        infobutton = QToolButton()
+        infobutton.setAutoRaise(True)
+        infobutton.setMaximumHeight(self.statusbar.height())
+        infobutton.setIcon(icon)
+        # self.statusbar.addWidget(infobutton)
+        self.snappingbutton = QToolButton()
+        self.snappingbutton.setText("Snapping: On")
+        self.snappingbutton.setAutoRaise(True)
+        self.snappingbutton.pressed.connect(self.toggle_snapping)
+        self.statusbar.addWidget(self.snappingbutton)
+        # self.statusbar.addWidget(self.projectlabel)
+        # self.statusbar.addWidget(self.userlabel)
         spacer = createSpacer()
         spacer2 = createSpacer()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         spacer2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.statusbar.addWidget(spacer)
-        self.statusbar.addWidget(self.positionlabel)
+        # self.statusbar.addWidget(spacer)
+        # self.statusbar.addWidget(self.positionlabel)
         self.statusbar.addWidget(spacer2)
         self.statusbar.addWidget(self.gpslabel)
 
@@ -231,6 +243,7 @@ class MainWindow(ui_mainwindow.Ui_MainWindow, QMainWindow):
         RoamEvents.selectionchanged.connect(self.showInfoResults)
         RoamEvents.show_widget.connect(self.dataentrywidget.add_widget)
         RoamEvents.closeProject.connect(self.close_project)
+        RoamEvents.snappingChanged.connect(self.snapping_changed)
 
         GPS.gpsposition.connect(self.update_gps_label)
         GPS.gpsdisconnected.connect(self.gps_disconnected)
@@ -238,6 +251,21 @@ class MainWindow(ui_mainwindow.Ui_MainWindow, QMainWindow):
         self.legendpage.showmap.connect(self.showmap)
 
         self.currentselection = {}
+
+    def snapping_changed(self, snapping):
+        if snapping:
+            self.snappingbutton.setText("Snapping: On")
+        else:
+            self.snappingbutton.setText("Snapping: Off")
+        
+    def toggle_snapping(self):
+        try:
+            tool = self.canvas.mapTool()
+            tool.toggle_snapping()
+            snapping = tool.snapping
+            self.snapping_changed(snapping)
+        except AttributeError:
+            pass
 
     def update_scale_from_item(self, index):
         scale, _ = self.scalewidget.toDouble(index.data(Qt.DisplayRole))
@@ -353,10 +381,23 @@ class MainWindow(ui_mainwindow.Ui_MainWindow, QMainWindow):
             RoamEvents.raisemessage(*ex.error)
 
         featureform.featuredeleted(feature)
+        self.show_undo("Feature deleted", "Undo Delete", form, feature)
+
+    def show_undo(self, title, message, form, feature):
+        item = roam.messagebaritems.UndoMessageItem(title, message, form, feature)
+        item.undo.connect(self.undo_delete)
+        self.bar.pushItem(item)
+
+    def undo_delete(self, form, feature):
+        # Add the feature back to the layer
+        self.bar.popWidget()
+        layer = form.QGISLayer
+        layer.startEditing()
+        layer.addFeature(feature)
+        layer.commitChanges()
 
     def search_for_projects(self):
         server = roam.config.settings.get('updateserver', '')
-        print server
         self.projectupdater.update_server(server, self.projects)
 
     def settingsupdated(self, settings):
@@ -478,31 +519,11 @@ class MainWindow(ui_mainwindow.Ui_MainWindow, QMainWindow):
         self.canvas.refresh()
         RoamEvents.editgeometry_complete.emit(form, feature)
 
-    def addNewFeature(self, form, geometry):
-        """
-        Add a new new feature to the given layer
-        """
-        layer = form.QGISLayer
-
-        if layer.geometryType() in [QGis.WKBMultiLineString, QGis.WKBMultiPoint, QGis.WKBMultiPolygon]:
-            geometry.convertToMultiType()
-
-        try:
-            # TODO: This is a gross hack. We need to move this out into a edit tool with better control.
-            form, feature = self.editfeaturestack.pop()
-            self.editfeaturegeometry(form, feature, newgeometry=geometry)
-            return
-        except IndexError:
-            pass
-
-        feature = form.new_feature(set_defaults=True)
-        feature.setGeometry(geometry)
-        self.openForm(form, feature, editmode=False)
-
     def exit(self):
         """
         Exit the application.
         """
+        self.projectupdater.quit()
         self.close()
 
     def showInfoResults(self, results):
@@ -571,6 +592,10 @@ class MainWindow(ui_mainwindow.Ui_MainWindow, QMainWindow):
         self.projectOpened()
         GPS.crs = crs
 
+    @property
+    def enabled_plugins(self):
+        return self.settings.get('plugins', [])
+
     @roam.utils.timeit
     def projectOpened(self):
         """
@@ -627,7 +652,8 @@ class MainWindow(ui_mainwindow.Ui_MainWindow, QMainWindow):
             # Remove the page widget, because we make it on each load
             widget = self.stackedWidget.widget(action.property("page"))
             self.stackedWidget.removeWidget(widget)
-            widget.deleteLater()
+            if widget:
+                widget.deleteLater()
 
             self.menutoolbar.removeAction(action)
         self.pluginactions = []

@@ -15,7 +15,6 @@ from roam.api import featureform, RoamEvents
 from roam.ui.uifiles import dataentry_widget, dataentry_base
 from roam.structs import CaseInsensitiveDict
 
-import roam.qgisfunctions
 import roam.defaults as defaults
 import roam.editorwidgets.core
 
@@ -31,7 +30,6 @@ class DataEntryWidget(dataentry_widget, dataentry_base):
         self.setupUi(self)
         self.featureform = None
         self.feature = None
-        self.fields = None
         self.project = None
         self.canvas = canvas
         self.widgetstack = []
@@ -116,17 +114,10 @@ class DataEntryWidget(dataentry_widget, dataentry_base):
             # Clear all the other open widgets that might be open.
             self.clear(dontemit=True)
 
-        # One capture geometry, even for sub forms?
-        # HACK Remove me and do something smarter
-        roam.qgisfunctions.capturegeometry = feature.geometry()
-
-        # Hold a reference to the fields because QGIS will let the
-        # go out of scope and we get crashes. Yay!
         layer = form.QGISLayer
-        self.fields = feature.fields()
         attributes = feature.attributes()
 
-        fields = [field.name().lower() for field in self.fields]
+        fields = [field.name().lower() for field in layer.pendingFields()]
         # Something is strange with default values and spatilite. Just delete them for now.
         if layer.dataProvider().name() == 'spatialite':
             pkindexes = layer.dataProvider().pkAttributeIndexes()
@@ -135,18 +126,15 @@ class DataEntryWidget(dataentry_widget, dataentry_base):
                 del attributes[index]
         values = CaseInsensitiveDict(zip(fields, attributes))
 
-        defaultvalues = {}
+        savedvalues = {}
         if not editmode:
-            defaultwidgets = form.widgetswithdefaults()
-            defaultvalues = defaults.default_values(defaultwidgets, feature, layer)
-            defaultvalues.update(featureform.loadsavedvalues(layer))
-
-        values.update(defaultvalues)
+            savedvalues = featureform.loadsavedvalues(layer)
+            values.update(savedvalues)
 
         initconfig = dict(form=form,
                           canvas=self.canvas,
                           editmode=editmode,
-                          defaults=defaultvalues)
+                          defaults=savedvalues)
 
         config = dict(editmode=editmode,
                       layers=QgsMapLayerRegistry.instance().mapLayers(),

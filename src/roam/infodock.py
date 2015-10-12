@@ -3,7 +3,7 @@ import os
 from string import Template
 from collections import OrderedDict
 
-from PyQt4.QtGui import ( QWidget, QIcon, QListWidgetItem, QMouseEvent, QApplication)
+from PyQt4.QtGui import ( QWidget, QIcon, QListWidgetItem, QMouseEvent, QApplication, QKeySequence)
 
 from PyQt4.QtCore import (Qt, QUrl,
                           QEvent, pyqtSignal
@@ -12,7 +12,7 @@ from PyQt4.QtCore import (Qt, QUrl,
 from PyQt4.QtWebKit import QWebPage
 
 from qgis.core import (QgsExpression, QgsFeature,
-                       QgsMapLayer, QgsFeatureRequest)
+                       QgsMapLayer, QgsFeatureRequest, QgsGeometry)
 
 from roam import utils
 from roam.flickwidget import FlickCharm
@@ -88,6 +88,8 @@ class InfoDock(infodock_widget, QWidget):
         self.layerList.currentRowChanged.connect(self.layerIndexChanged)
         self.attributesView.linkClicked.connect(self.handle_link)
         self.attributesView.page().setLinkDelegationPolicy(QWebPage.DelegateAllLinks)
+        action = self.attributesView.pageAction(QWebPage.Copy)
+        action.setShortcut(QKeySequence.Copy)
         self.grabGesture(Qt.SwipeGesture)
         self.setAttribute(Qt.WA_AcceptTouchEvents)
         self.editButton.pressed.connect(self.openform)
@@ -185,7 +187,31 @@ class InfoDock(infodock_widget, QWidget):
 
     def openform(self):
         cursor = self.selection
-        RoamEvents.load_feature_form(cursor.form, cursor.feature, True)
+        tools = self.project.layer_tools(cursor.layer)
+        if 'inspection' in tools:
+            config = tools['inspection']
+            form, feature = self.get_inspection_config(cursor.feature, config)
+            editmode = False
+        else:
+            form = cursor.form
+            feature = cursor.feature
+            editmode = True
+
+        RoamEvents.load_feature_form(form, feature, editmode)
+
+    def get_inspection_config(self, current_feature, config):
+        form = config['form']
+        newform = self.project.form_by_name(form)
+        if config.get('mode', "copy").lower() == 'copy':
+            geom = current_feature.geometry()
+            newgeom = QgsGeometry(geom)
+            newfeature = newform.new_feature(geometry=newgeom)
+            mappings = config.get('field_mapping', {})
+            for fieldfrom, fieldto in mappings.iteritems():
+                newfeature[fieldto] = current_feature[fieldfrom]
+            return newform, newfeature
+        else:
+            raise NotImplementedError("Only copy mode supported currently")
 
     def editgeom(self):
         cursor = self.selection
@@ -293,7 +319,7 @@ class InfoDock(infodock_widget, QWidget):
         self.attributesView.setHtml(html, templates.baseurl)
         tools = self.project.layer_tools(layer)
         hasform = not form is None
-        editattributes = 'edit_attributes' in tools and hasform
+        editattributes = 'edit_attributes' in tools or 'inspection' in tools and hasform
         editgeom = 'edit_geom' in tools and hasform
         deletefeature = 'delete' in tools and hasform
         self.deleteFeatureButton.setVisible(deletefeature)

@@ -10,10 +10,11 @@ except ImportError:
     hascamera = False
 
 from PyQt4.QtGui import QDialog, QGridLayout, QLabel, QLayout, QPixmap, QFileDialog, QAction, QToolButton, QIcon, \
-    QToolBar
-from PyQt4.QtGui import QWidget, QImage, QSizePolicy
-from PyQt4.QtCore import QByteArray, pyqtSignal, QVariant, QTimer, Qt, QSize, QDateTime
+    QToolBar, QPainter, QPen
+from PyQt4.QtGui import QWidget, QImage, QSizePolicy, QTextDocument
+from PyQt4.QtCore import QByteArray, pyqtSignal, QVariant, QTimer, Qt, QSize, QDateTime, QPointF
 
+from qgis.core import QgsExpression
 from PIL.ImageQt import ImageQt
 
 from roam.editorwidgets.core import EditorWidget, LargeEditorWidget, registerwidgets
@@ -30,6 +31,58 @@ import roam.resources_rc
 
 class CameraError(Exception):
     pass
+
+
+def stamp_from_config(image, config):
+    stamp = config.get('stamp', None)
+    form = config.get('formwidget', None)
+    feature = None
+    print stamp
+    if not stamp:
+        return image
+
+    if form:
+        feature = form.to_feature()
+    image = stamp_image(image, stamp['value'], stamp['position'], feature)
+    return image
+
+
+def stamp_image(image, expression_str, position, feature):
+    painter = QPainter(image)
+    data = QgsExpression.replaceExpressionText(expression_str, feature, None)
+    if not data:
+        return image
+
+    data = data.replace(r"\n", "<br>")
+    style = """
+    body {
+        color: yellow;
+    }
+    """
+    doc = QTextDocument()
+    doc.setDefaultStyleSheet(style)
+    data = "<body>{}</body>".format(data)
+    doc.setHtml(data)
+    print data
+    point = QPointF(20, 20)
+
+    # Wrap the text so we don't go crazy
+    if doc.size().width() > 300:
+        doc.setTextWidth(300)
+    if position == "top-left":
+        point = QPointF(20, 20)
+    elif position == "top-right":
+        x = image.width() - 20 - doc.size().width()
+        point = QPointF(x, 20)
+    elif position == "bottom-left":
+        point = QPointF(20, image.height() - 20 - doc.size().height())
+    elif position == "bottom-right":
+        x = image.width() - 20 - doc.size().width()
+        y = image.height() - 20 - doc.size().height()
+        point = QPointF(x, y)
+    painter.translate(point)
+    doc.drawContents(painter)
+    return image
 
 
 def save_image(image, path, name):
@@ -91,7 +144,6 @@ class _CameraWidget(QWidget):
 
     def takeimage(self, *args):
         self.timer.stop()
-
         img = self.cam.getImage()
         self.image = ImageQt(img)
         self.pixmap = QPixmap.fromImage(self.image)
@@ -132,24 +184,30 @@ class _CameraWidget(QWidget):
 class CameraWidget(LargeEditorWidget):
     def __init__(self, *args, **kwargs):
         super(CameraWidget, self).__init__(*args, **kwargs)
+        self._value = None
 
     def createWidget(self, parent):
         return _CameraWidget(parent)
 
     def initWidget(self, widget):
-        widget.imagecaptured.connect(self.emitvaluechanged)
-        widget.done.connect(self.emitfished)
+        widget.imagecaptured.connect(self.image_captured)
+        widget.done.connect(self.emit_finished)
+
+    def image_captured(self, pixmap):
+        image = stamp_from_config(pixmap, self.config)
+        self._value = image
+        self.emitvaluechanged(self._value)
 
     def after_load(self):
         camera = roam.config.settings.get('camera', 1)
         try:
             self.widget.start(dev=camera)
         except CameraError as ex:
-            self.emitcancel(reason=ex.message)
+            self.emit_cancel(reason=ex.message)
             return
 
     def value(self):
-        return self.widget.pixmap
+        return self._value
 
     def __del__(self):
         if self.widget:
@@ -166,9 +224,15 @@ class DrawingPadWidget(LargeEditorWidget):
         return pad1
 
     def initWidget(self, widget):
-        widget.actionSave.triggered.connect(self.emitfished)
-        widget.actionCancel.triggered.connect(self.emitcancel)
+        widget.toolStamp.pressed.connect(self.stamp_image)
+        widget.actionSave.triggered.connect(self.emit_finished)
+        widget.actionCancel.triggered.connect(self.emit_cancel)
         widget.canvas = self.canvas
+
+    def stamp_image(self):
+        image = self.widget.pixmap
+        image = stamp_from_config(image, self.config)
+        self.widget.pixmap = image
 
     def value(self):
         return self.widget.pixmap
@@ -190,7 +254,7 @@ class ImageWidget(EditorWidget):
 
         self.selectAction = QAction(QIcon(r":\widgets\folder"), "From folder", None)
         self.cameraAction = QAction(QIcon(":\widgets\camera"), "Camera", None)
-        self.drawingAction = QAction(QIcon(":\widgets\drawing"), "Drawing", None)
+        self.drawingAction = QAction(QIcon(":\widgets\drawing"), "Drawing/Map snapshot", None)
 
         self.selectAction.triggered.connect(self._selectImage)
         self.cameraAction.triggered.connect(self._selectCamera)
@@ -232,10 +296,15 @@ class ImageWidget(EditorWidget):
 
     def _selectDrawing(self, *args):
         image = self.widget.orignalimage
-        self.largewidgetrequest.emit(DrawingPadWidget, image, self.phototaken, {})
+        self.open_large_widget(DrawingPadWidget, image, self.phototaken, self.config)
 
     def _selectCamera(self):
-        self.largewidgetrequest.emit(CameraWidget, None, self.phototaken, {})
+        self.open_large_widget(CameraWidget, None, self.phototaken_camera, self.config)
+
+    def phototaken_camera(self, value):
+        pix = value.copy()
+        self.setvalue(pix)
+        self.modified = True
 
     def phototaken(self, value):
         self.setvalue(value)
